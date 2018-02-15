@@ -131,10 +131,10 @@ typedef struct _PortList
 typedef struct
 {
     DB*  db;
+    int check_crc;            /* Data is crc32'ed */
     const char* name;
     PortList* ports;
 } Database;
-
 
 /**
  * Structure for holding port instance data
@@ -142,6 +142,7 @@ typedef struct
 typedef struct 
 {
     ErlDrvPort port;
+    ErlDrvTermData dport;       /* the port identifier as DriverTermData */    
 
     ErlDrvMutex* port_lock;     /* Mutex for this port (to permit async jobs to safely update this
                                  * structure) */
@@ -173,12 +174,27 @@ typedef struct
 
 } PortData;
 
+// Hack to handle R15 driver used with pre R15 driver
+#if ERL_DRV_EXTENDED_MAJOR_VERSION == 1
+typedef int  ErlDrvSizeT;
+typedef int  ErlDrvSSizeT;
+#endif
+
+#if (ERL_DRV_EXTENDED_MAJOR_VERSION > 2) || ((ERL_DRV_EXTENDED_MAJOR_VERSION == 2) && (ERL_DRV_EXTENDED_MINOR_VERSION >= 1))
+#define OUTPUT_TERM(p, message, len) erl_drv_output_term((p)->dport,(message),(len))
+#define SEND_TERM(p, to, message, len) erl_drv_send_term((p)->dport,(to),(message),(len))
+
+#else
+#define OUTPUT_TERM(p, message, len) driver_output_term((p)->port,(message),(len))
+#define SEND_TERM(p, to, message, len) driver_send_term((p)->port,(to),(message),(len))
+#endif
+
 /**
  * Function Prototypes
  */
 
 void bdberl_async_cleanup(PortData* d);
-void bdberl_send_rc(ErlDrvPort port, ErlDrvTermData pid, int rc);
+void bdberl_send_rc(PortData* d, ErlDrvTermData pid, int rc);
 void bdberl_async_cleanup_and_send_rc(PortData* d, int rc);
 
 char* bdberl_rc_to_atom_str(int rc);
@@ -220,26 +236,26 @@ void bdberl_txn_tpool_run(TPoolJobFunc main_fn,  PortData* d, TPoolJobFunc cance
 #define FAIL_IF_CURSOR_OPEN(d, outbuf) {                        \
     if (NULL != d->cursor)                                      \
     {                                                           \
-        bdberl_send_rc(d->port, d->port_owner, ERROR_CURSOR_OPEN);     \
+        bdberl_send_rc(d, d->port_owner, ERROR_CURSOR_OPEN);     \
         RETURN_INT(0, outbuf);                                  \
     }}
 #define FAIL_IF_NO_CURSOR(d, outbuf) {                          \
     if (NULL == d->cursor)                                      \
     {                                                           \
-        bdberl_send_rc(d->port, d->port_owner, ERROR_NO_CURSOR);       \
+        bdberl_send_rc(d, d->port_owner, ERROR_NO_CURSOR);       \
         RETURN_INT(0, outbuf);                                  \
     }}
 
 #define FAIL_IF_TXN_OPEN(d, outbuf) {                           \
         if (NULL != d->txn)                                     \
     {                                                           \
-        bdberl_send_rc(d->port, d->port_owner, ERROR_TXN_OPEN);        \
+        bdberl_send_rc(d, d->port_owner, ERROR_TXN_OPEN);        \
         RETURN_INT(0, outbuf);                                  \
     }}
 #define FAIL_IF_NO_TXN(d, outbuf) {                             \
         if (NULL == d->txn)                                     \
     {                                                           \
-        bdberl_send_rc(d->port, d->port_owner, ERROR_NO_TXN);          \
+        bdberl_send_rc(d, d->port_owner, ERROR_NO_TXN);          \
         RETURN_INT(0, outbuf);                                  \
     }}
 

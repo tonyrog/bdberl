@@ -184,7 +184,8 @@ open(Name, Type, Opts) ->
         hash  -> TypeCode = ?DB_TYPE_HASH;
         unknown -> TypeCode = ?DB_TYPE_UNKNOWN %% BDB automatically determines if file exists
     end,
-    Flags = process_flags(lists:umerge(Opts, [auto_commit, threaded])),
+    %% Flags = process_flags(lists:umerge(Opts, [auto_commit, threaded])),
+    Flags = process_flags(lists:umerge(Opts, [])),
     Cmd = <<Flags:32/native, TypeCode:8/signed-native, (list_to_binary(Name))/bytes, 0:8/native>>,
     <<Rc:32/signed-native>> = erlang:port_control(get_port(), ?CMD_OPEN_DB, Cmd),
     recv_val(Rc).
@@ -557,7 +558,7 @@ transaction(_Fun, 0, _TimeLeft, _Opts) ->
     {error, {transaction_failed, retry_limit_reached}};
 
 transaction(Fun, Retries, TimeLeft, Opts) ->
-    Start = now(),
+    Start = erlang_system_time_us(),
     case txn_begin(Opts) of
         ok ->
             try Fun() of
@@ -581,7 +582,7 @@ transaction(Fun, Retries, TimeLeft, Opts) ->
                         end,
                     T = case TimeLeft of
                             infinity -> infinity;
-                            TimeLeft -> TimeLeft - timer:now_diff(now(), Start)
+                            TimeLeft -> TimeLeft-(erlang_system_time_us()-Start)
                         end,
                     transaction(Fun, R, T, Opts);
 
@@ -595,6 +596,13 @@ transaction(Fun, Retries, TimeLeft, Opts) ->
             Error
     end.
 
+erlang_system_time_us() ->
+    try erlang:system_time(micro_seconds)
+    catch
+	error:undef ->
+	    {MS,S,US} = os:timestamp(),
+	    (MS*1000000+S)*1000000+US
+    end.
 
 %%--------------------------------------------------------------------
 %% @doc

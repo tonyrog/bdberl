@@ -55,9 +55,9 @@ static void bdberl_drv_stop(ErlDrvData handle);
 
 static void bdberl_drv_finish();
 
-static int bdberl_drv_control(ErlDrvData handle, unsigned int cmd, 
-                              char* inbuf, int inbuf_sz, 
-                              char** outbuf, int outbuf_sz);
+static ErlDrvSSizeT bdberl_drv_control(ErlDrvData handle, unsigned int cmd, 
+				       char* inbuf, ErlDrvSizeT inbuf_sz, 
+				       char** outbuf, ErlDrvSizeT outbuf_sz);
 
 /** 
  * Driver Entry
@@ -110,7 +110,7 @@ static void do_async_truncate(void* arg);
 static void do_sync_data_dirs_info(PortData *p);
 static void do_sync_driver_info(PortData *d);
 
-static int send_dir_info(ErlDrvPort port, ErlDrvTermData pid, const char *path);
+static int send_dir_info(PortData* d, ErlDrvTermData pid, const char *path);
 
 static int add_dbref(PortData* data, int dbref);
 static int del_dbref(PortData* data, int dbref);
@@ -203,7 +203,7 @@ static int G_BDBERL_PIPE[2] = {-1, -1};
  */
 static ErlDrvRWLock*  G_LOG_RWLOCK = 0;
 static ErlDrvTermData G_LOG_PID;
-static ErlDrvPort     G_LOG_PORT;
+static PortData*      G_LOG_PORT_DATA;
 
 /**
  * Default page size to use for newly created databases
@@ -372,7 +372,7 @@ DRIVER_INIT(bdberl_drv)
 
         // Initialize logging lock and refs
         G_LOG_RWLOCK = erl_drv_rwlock_create("bdberl_drv: G_LOG_RWLOCK");
-        G_LOG_PORT   = 0;
+        G_LOG_PORT_DATA = NULL;
         G_LOG_PID    = 0;
     }
     else
@@ -400,7 +400,8 @@ static ErlDrvData bdberl_drv_start(ErlDrvPort port, char* buffer)
 
     // Save handle to the port
     d->port = port;
-
+    d->dport = driver_mk_port(port);
+    
     // Allocate a mutex for the port
     d->port_lock = erl_drv_mutex_create("bdberl_port_lock");
 
@@ -475,14 +476,14 @@ static void bdberl_drv_stop(ErlDrvData handle)
     // If this port was registered as the endpoint for logging, go ahead and 
     // remove it. Note that we don't need to lock to check this since we only
     // unregister if it's already initialized to this port.
-    if (G_LOG_PORT == d->port)
+    if (G_LOG_PORT_DATA == d)
     {
         DBG("Stopping port %p - removing logging port\r\n", d->port);
 
         WRITE_LOCK(G_LOG_RWLOCK);
 
         // Remove the references
-        G_LOG_PORT = 0;
+        G_LOG_PORT_DATA = NULL;
         G_LOG_PID  = 0;
         
         // Unregister with BDB -- MUST DO THIS WITH WRITE LOCK HELD!
@@ -583,9 +584,9 @@ static void bdberl_drv_finish()
     DBG("BDB DRIVER FINISHED\r\n");
 }
 
-static int bdberl_drv_control(ErlDrvData handle, unsigned int cmd, 
-                              char* inbuf, int inbuf_sz, 
-                              char** outbuf, int outbuf_sz)
+static ErlDrvSSizeT bdberl_drv_control(ErlDrvData handle, unsigned int cmd, 
+				       char* inbuf,  ErlDrvSizeT inbuf_sz, 
+				       char** outbuf, ErlDrvSizeT outbuf_sz)
 {
     PortData* d = (PortData*)handle;
     switch(cmd)        
@@ -606,12 +607,12 @@ static int bdberl_drv_control(ErlDrvData handle, unsigned int cmd,
             ErlDrvTermData response[] = { ERL_DRV_ATOM, driver_mk_atom("ok"),
                                           ERL_DRV_INT,  dbref,
                                           ERL_DRV_TUPLE, 2};
-            driver_send_term(d->port, d->port_owner,
-                             response, sizeof(response) / sizeof(response[0]));
+            SEND_TERM(d, d->port_owner,
+		      response, sizeof(response) / sizeof(response[0]));
         }
         else // failure: send {error, atom() | {error, {unknown, Rc}}
         {
-            bdberl_send_rc(d->port, d->port_owner, rc);
+            bdberl_send_rc(d, d->port_owner, rc);
         }
         // Outbuf is: <<Rc:32>> - always send 0 and the driver will receive the real value
         RETURN_INT(0, outbuf);
@@ -630,7 +631,7 @@ static int bdberl_drv_control(ErlDrvData handle, unsigned int cmd,
         int rc = close_database(dbref, flags, d);
 
         // Queue up a message for bdberl:close to process
-        bdberl_send_rc(d->port, d->port_owner, rc);
+        bdberl_send_rc(d, d->port_owner, rc);
         // Outbuf is: <<Rc:32>> - always send 0 and the driver will receive the real value
         RETURN_INT(0, outbuf);
     }
@@ -673,7 +674,7 @@ static int bdberl_drv_control(ErlDrvData handle, unsigned int cmd,
         // Put/commit requires a transaction to be active
         if (cmd == CMD_PUT_COMMIT && (!d->txn))
         {
-            bdberl_send_rc(d->port, d->port_owner, ERROR_NO_TXN);
+            bdberl_send_rc(d, d->port_owner, ERROR_NO_TXN);
             RETURN_INT(0, outbuf);
         }
 
@@ -719,7 +720,7 @@ static int bdberl_drv_control(ErlDrvData handle, unsigned int cmd,
         else
         {
             // Invalid dbref
-            bdberl_send_rc(d->port, d->port_owner, ERROR_INVALID_DBREF);
+            bdberl_send_rc(d, d->port_owner, ERROR_INVALID_DBREF);
             RETURN_INT(0, outbuf);
         }
     }        
@@ -750,12 +751,13 @@ static int bdberl_drv_control(ErlDrvData handle, unsigned int cmd,
             // Grab the database handle and open the cursor
             DB* db = G_DATABASES[dbref].db;
             int rc = db->cursor(db, d->txn, &(d->cursor), flags);
-            bdberl_send_rc(d->port, d->port_owner, rc);
+            bdberl_send_rc(d, d->port_owner, rc);
+	    d->async_dbref = dbref;
             RETURN_INT(0, outbuf);
         }
         else
         {
-            bdberl_send_rc(d->port, d->port_owner, ERROR_INVALID_DBREF);
+            bdberl_send_rc(d, d->port_owner, ERROR_INVALID_DBREF);
             RETURN_INT(0, outbuf);
         }
     }
@@ -790,7 +792,7 @@ static int bdberl_drv_control(ErlDrvData handle, unsigned int cmd,
         d->cursor = 0;
         
         // Send result code
-        bdberl_send_rc(d->port, d->port_owner, rc);
+        bdberl_send_rc(d, d->port_owner, rc);
         RETURN_INT(0, outbuf);
     }
     case CMD_REMOVE_DB:
@@ -801,7 +803,7 @@ static int bdberl_drv_control(ErlDrvData handle, unsigned int cmd,
         // Inbuf is: << dbname/bytes, 0:8 >>
         const char* dbname = UNPACK_STRING(inbuf, 0);
         int rc = delete_database(dbname, d);
-        bdberl_send_rc(d->port, d->port_owner, rc);
+        bdberl_send_rc(d, d->port_owner, rc);
         RETURN_INT(0, outbuf);
     }
     case CMD_TRUNCATE:
@@ -836,13 +838,13 @@ static int bdberl_drv_control(ErlDrvData handle, unsigned int cmd,
     {
         // If this port is not the current logger, make it so. Only one logger can be registered
         // at a time. 
-        if (G_LOG_PORT != d->port)
+        if (G_LOG_PORT_DATA != d)
         {
             // Grab the write lock and update the global vars; also make sure to update BDB callbacks
             // within the write lock to avoid race conditions.
             WRITE_LOCK(G_LOG_RWLOCK);
             
-            G_LOG_PORT = d->port;
+            G_LOG_PORT_DATA = d;
             G_LOG_PID  = driver_connected(d->port);
 
             G_DB_ENV->set_msgcall(G_DB_ENV, &bdb_msgcall);
@@ -895,11 +897,11 @@ static int bdberl_drv_control(ErlDrvData handle, unsigned int cmd,
         if (rc == 0)
         {
             // send a dirinfo message - will send an error message on a NULL lg_dir
-            send_dir_info(d->port, d->port_owner, lg_dir);
+            send_dir_info(d, d->port_owner, lg_dir);
         }
         else
         {
-            bdberl_send_rc(d->port, d->port_owner, rc);
+            bdberl_send_rc(d, d->port_owner, rc);
         }
 
         // Let caller know that the operation is in progress
@@ -1101,6 +1103,7 @@ static int open_database(const char* name, DBTYPE type, unsigned int flags, Port
         G_DATABASES[dbref].name = strdup(name);
         G_DATABASES[dbref].ports = zalloc(sizeof(PortList));
         G_DATABASES[dbref].ports->port = data->port;
+	G_DATABASES[dbref].check_crc = 1;
 
         // Make entry in hash table of names
         hive_hash_add(G_DATABASES_NAMES, G_DATABASES[dbref].name, &(G_DATABASES[dbref]));
@@ -1167,7 +1170,6 @@ static void check_all_databases_closed()
     LOCK_DATABASES((ErlDrvPort)-1); // use unlikely port number - have no port here.
 
     int dbref;
-    int rc;
     for (dbref = 0; dbref < G_DATABASES_SIZE; dbref++)
     {
         Database* database = &G_DATABASES[dbref];
@@ -1180,6 +1182,8 @@ static void check_all_databases_closed()
         if (database->db != NULL)
         {
             int flags = 0;
+	    int rc = 0;
+	    (void) rc;
             DBG("final db->close(%p, %08x) (for dbref %d)", database->db, flags, dbref);
             rc = database->db->close(database->db, flags);
             DBG(" = %s (%d)\r\n", rc == 0 ? "ok" : bdberl_rc_to_atom_str(rc), rc);
@@ -1347,7 +1351,7 @@ char *bdberl_rc_to_atom_str(int rc)
 // Send a {dirinfo, Path, FsId, MbyteAvail} message to pid given.
 // Send an {errno, Reason} on failure
 // returns 0 on success, errno on failure
-static int send_dir_info(ErlDrvPort port, ErlDrvTermData pid, const char *path)
+static int send_dir_info(PortData* d, ErlDrvTermData pid, const char *path)
 {
     struct statvfs svfs;
     int rc;
@@ -1367,7 +1371,7 @@ static int send_dir_info(ErlDrvPort port, ErlDrvTermData pid, const char *path)
 
     if (rc != 0)
     {
-        bdberl_send_rc(port, pid, rc);
+        bdberl_send_rc(d, pid, rc);
     }
     else
     {
@@ -1385,13 +1389,13 @@ static int send_dir_info(ErlDrvPort port, ErlDrvTermData pid, const char *path)
                                                           sizeof(svfs.f_fsid),
                                       ERL_DRV_UINT, mbyte_avail,
                                       ERL_DRV_TUPLE, 4};
-        driver_send_term(port, pid, response, sizeof(response) / sizeof(response[0]));
+        SEND_TERM(d, pid, response, sizeof(response) / sizeof(response[0]));
     }
     return rc;
 }
 
 
-void bdberl_send_rc(ErlDrvPort port, ErlDrvTermData pid, int rc)
+void bdberl_send_rc(PortData* d, ErlDrvTermData pid, int rc)
 {
     // TODO: May need to tag the messages a bit more explicitly so that if another async
     // job runs to completion before the message gets delivered we don't mis-interpret this
@@ -1399,7 +1403,7 @@ void bdberl_send_rc(ErlDrvPort port, ErlDrvTermData pid, int rc)
     if (rc == 0)
     {
         ErlDrvTermData response[] = {ERL_DRV_ATOM, driver_mk_atom("ok")};
-        driver_send_term(port, pid, response, sizeof(response) / sizeof(response[0]));
+        SEND_TERM(d, pid, response, sizeof(response) / sizeof(response[0]));
     }
     else
     {
@@ -1410,7 +1414,7 @@ void bdberl_send_rc(ErlDrvPort port, ErlDrvTermData pid, int rc)
             ErlDrvTermData response[] = { ERL_DRV_ATOM,  driver_mk_atom("error"),
                                           ERL_DRV_ATOM,  driver_mk_atom(error),
                                           ERL_DRV_TUPLE, 2};
-            driver_send_term(port, pid, response, sizeof(response) / sizeof(response[0]));
+            SEND_TERM(d, pid, response, sizeof(response) / sizeof(response[0]));
         }
         else
         {
@@ -1419,7 +1423,7 @@ void bdberl_send_rc(ErlDrvPort port, ErlDrvTermData pid, int rc)
                                           ERL_DRV_INT,  rc,
                                           ERL_DRV_TUPLE, 2,
                                           ERL_DRV_TUPLE, 2};
-            driver_send_term(port, pid, response, sizeof(response) / sizeof(response[0]));
+            SEND_TERM(d, pid, response, sizeof(response) / sizeof(response[0]));
         }
     }
 }
@@ -1431,11 +1435,11 @@ void bdberl_async_cleanup_and_send_rc(PortData* d, int rc)
     // the port could go away without waiting on us to finish. This is acceptable, but we need
     // to be certain that there is no overlap of data between the two threads. driver_send_term
     // is safe to use from a thread, even if the port you're sending from has already expired.
-    ErlDrvPort port = d->port;
+    // ErlDrvPort port = d->port;
     ErlDrvTermData pid = d->port_owner;
 
     bdberl_async_cleanup(d);
-    bdberl_send_rc(port, pid, rc);
+    bdberl_send_rc(d, pid, rc);
 }
 
 static void async_cleanup_and_send_kv(PortData* d, int rc, DBT* key, DBT* value)
@@ -1445,7 +1449,7 @@ static void async_cleanup_and_send_kv(PortData* d, int rc, DBT* key, DBT* value)
     // the port could go away without waiting on us to finish. This is acceptable, but we need
     // to be certain that there is no overlap of data between the two threads. driver_send_term
     // is safe to use from a thread, even if the port you're sending from has already expired.
-    ErlDrvPort port = d->port;
+    // ErlDrvPort port = d->port;
     ErlDrvTermData pid = d->port_owner;
 
     bdberl_async_cleanup(d);
@@ -1457,12 +1461,12 @@ static void async_cleanup_and_send_kv(PortData* d, int rc, DBT* key, DBT* value)
                                       ERL_DRV_BUF2BINARY, (ErlDrvTermData)key->data, (ErlDrvUInt)key->size,
                                       ERL_DRV_BUF2BINARY, (ErlDrvTermData)value->data, (ErlDrvUInt)value->size,
                                       ERL_DRV_TUPLE, 3};
-        driver_send_term(port, pid, response, sizeof(response) / sizeof(response[0]));
+        SEND_TERM(d, pid, response, sizeof(response) / sizeof(response[0]));
     }
     else if (rc == DB_NOTFOUND)
     {
         ErlDrvTermData response[] = { ERL_DRV_ATOM, driver_mk_atom("not_found") };
-        driver_send_term(port, pid, response, sizeof(response) / sizeof(response[0]));
+        SEND_TERM(d, pid, response, sizeof(response) / sizeof(response[0]));
     }
     else
     {
@@ -1473,7 +1477,7 @@ static void async_cleanup_and_send_kv(PortData* d, int rc, DBT* key, DBT* value)
             ErlDrvTermData response[] = { ERL_DRV_ATOM,  driver_mk_atom("error"),
                                           ERL_DRV_ATOM,  driver_mk_atom(error),
                                           ERL_DRV_TUPLE, 2};
-            driver_send_term(port, pid, response, sizeof(response) / sizeof(response[0]));
+            SEND_TERM(d, pid, response, sizeof(response) / sizeof(response[0]));
         }
         else
         {
@@ -1482,7 +1486,7 @@ static void async_cleanup_and_send_kv(PortData* d, int rc, DBT* key, DBT* value)
                                           ERL_DRV_INT,  rc,
                                           ERL_DRV_TUPLE, 2,
                                           ERL_DRV_TUPLE, 2};
-            driver_send_term(port, pid, response, sizeof(response) / sizeof(response[0]));
+            SEND_TERM(d, pid, response, sizeof(response) / sizeof(response[0]));
         }
     }
 }
@@ -1501,6 +1505,8 @@ static void do_async_put(void* arg)
     // Setup DBTs 
     DBT key;
     DBT value;
+    int rc = 0;
+    
     memset(&key, '\0', sizeof(DBT));
     memset(&value, '\0', sizeof(DBT));
 
@@ -1510,19 +1516,19 @@ static void do_async_put(void* arg)
     value.size = UNPACK_INT(d->work_buffer, 12 + key.size);
     value.data = UNPACK_BLOB(d->work_buffer, 12 + key.size + 4);
 
-    // Check CRC in value payload - first 4 bytes are CRC of rest of bytes
-    assert(value.size >= 4);
-    uint32_t calc_crc32 = bdberl_crc32(value.data+4, value.size-4);
-    uint32_t buf_crc32 = *(uint32_t*) value.data;
-    
-    int rc;
-    if (calc_crc32 != buf_crc32)
-    {
-        DBGCMD(d, "CRC-32 error on put data - buffer %08X calculated %08X.", buf_crc32, calc_crc32);
-        rc = ERROR_INVALID_VALUE;
+    if (G_DATABASES[dbref].check_crc) {
+	// Check CRC in value payload - first 4 bytes are CRC of rest of bytes
+	assert(value.size >= 4);
+	uint32_t calc_crc32 = bdberl_crc32(value.data+4, value.size-4);
+	uint32_t buf_crc32 = *(uint32_t*) value.data;
+	if (calc_crc32 != buf_crc32)
+	{
+	    DBGCMD(d, "CRC-32 error on put data - buffer %08X calculated %08X.", buf_crc32, calc_crc32);
+	    rc = ERROR_INVALID_VALUE;
+	}
     }
-    else
-    {
+    
+    if (rc == 0) {
         // Execute the actual put. All databases are opened with AUTO_COMMIT, so if msg->port->txn
         // is NULL, the put will still be atomic
         DBGCMD(d, "db->put(%p, %p, %p, %p, %08X) dbref %d key=%p(%d) value=%p(%d)",
@@ -1553,7 +1559,7 @@ static void do_async_get(void* arg)
 {
     // Payload is: << DbRef:32, Flags:32, KeyLen:32, Key:KeyLen >>
     PortData* d = (PortData*)arg;
-    
+
     // Get the database object, using the provided ref
     int dbref = UNPACK_INT(d->work_buffer, 0);
     DB* db = bdberl_lookup_dbref(dbref);
@@ -1575,20 +1581,22 @@ static void do_async_get(void* arg)
     value.flags = DB_DBT_MALLOC;
     
     int rc = db->get(db, d->txn, &key, &value, flags);
-    
-    // Check CRC - first 4 bytes are CRC of rest of bytes
-    if (rc == 0)
-    {
-        assert(value.size >= 4);
-        uint32_t calc_crc32 = bdberl_crc32(value.data+4, value.size-4);
-        uint32_t buf_crc32 = *(uint32_t*) value.data;
+
+    if (G_DATABASES[dbref].check_crc) {    
+	// Check CRC - first 4 bytes are CRC of rest of bytes
+	if (rc == 0)
+	{
+	    assert(value.size >= 4);
+	    uint32_t calc_crc32 = bdberl_crc32(value.data+4, value.size-4);
+	    uint32_t buf_crc32 = *(uint32_t*) value.data;
         
-        if (calc_crc32 != buf_crc32)
-        {
-            DBGCMD(d, "CRC-32 error on get data - buffer %08X calculated %08X.",
-                   buf_crc32, calc_crc32);
-            rc = ERROR_INVALID_VALUE;
-        }
+	    if (calc_crc32 != buf_crc32)
+	    {
+		DBGCMD(d, "CRC-32 error on get data - buffer %08X calculated %08X.",
+		       buf_crc32, calc_crc32);
+		rc = ERROR_INVALID_VALUE;
+	    }
+	}
     }
     
     // Cleanup transaction as necessary
@@ -1664,19 +1672,21 @@ static void do_async_cursor_get(void* arg)
     int rc = d->cursor->get(d->cursor, &key, &value, flags);
     DBGCMDRC(d, rc);
 
-    // Check CRC - first 4 bytes are CRC of rest of bytes
-    if (rc == 0)
-    {
-        assert(value.size >= 4);
-        uint32_t calc_crc32 = bdberl_crc32(value.data+4, value.size-4);
-        uint32_t file_crc32 = *(uint32_t*) value.data;
+    if (G_DATABASES[d->async_dbref].check_crc) {
+	// Check CRC - first 4 bytes are CRC of rest of bytes
+	if (rc == 0)
+	{
+	    assert(value.size >= 4);
+	    uint32_t calc_crc32 = bdberl_crc32(value.data+4, value.size-4);
+	    uint32_t file_crc32 = *(uint32_t*) value.data;
 
-        if (calc_crc32 != file_crc32)
-        {
-            rc = ERROR_INVALID_VALUE;
-        }
+	    if (calc_crc32 != file_crc32)
+	    {
+		rc = ERROR_INVALID_VALUE;
+	    }
+	}
     }
-
+    
     // Cleanup as necessary; any sort of failure means we need to close the cursor and abort
     // the transaction
     if (rc && rc != DB_NOTFOUND)
@@ -1793,18 +1803,18 @@ static void do_sync_data_dirs_info(PortData *d)
         
         if (rc == 0)
         {
-            rc = send_dir_info(d->port, d->port_owner, data_dir);
+            rc = send_dir_info(d, d->port_owner, data_dir);
         }
     }
 
     // BDB always searches the environment home too so add it to the list
     if (!got_db_home && rc == 0)
     {
-        rc = send_dir_info(d->port, d->port_owner, db_home);
+        rc = send_dir_info(d, d->port_owner, db_home);
     }
 
     // Send the return code - will termiante the receive loop in bdberl.erl
-    bdberl_send_rc(d->port, d->port_owner, rc);
+    bdberl_send_rc(d, d->port_owner, rc);
 }
 
 
@@ -1818,7 +1828,7 @@ static void do_sync_driver_info(PortData *d)
     bdberl_tpool_job_count(G_TPOOL_GENERAL, &general_pending, &general_active);
     bdberl_tpool_job_count(G_TPOOL_TXNS, &txn_pending, &txn_active);
 
-    ErlDrvPort port = d->port;
+    // ErlDrvPort port = d->port;
     ErlDrvTermData pid = d->port_owner;
     ErlDrvTermData response[] = {
         ERL_DRV_ATOM, driver_mk_atom("ok"),
@@ -1861,7 +1871,7 @@ static void do_sync_driver_info(PortData *d)
         ERL_DRV_LIST, 11+1,
         ERL_DRV_TUPLE, 2
     };
-    driver_send_term(port, pid, response, sizeof(response) / sizeof(response[0]));
+    SEND_TERM(d, pid, response, sizeof(response) / sizeof(response[0]));
 }
 
 
@@ -2226,10 +2236,10 @@ static void bdb_msgcall(const DB_ENV* dbenv, const char* msg)
 
 static void send_log_message(ErlDrvTermData* msg, int elements)
 {
-    if (G_LOG_PORT)
+    if (G_LOG_PORT_DATA)
     {
         READ_LOCK(G_LOG_RWLOCK);
-        driver_send_term(G_LOG_PORT, G_LOG_PID, msg, elements / sizeof(msg[0]));
+        SEND_TERM(G_LOG_PORT_DATA, G_LOG_PID, msg, elements / sizeof(msg[0]));
         READ_UNLOCK(G_LOG_RWLOCK);
     }
 }

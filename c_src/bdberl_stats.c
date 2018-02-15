@@ -54,7 +54,7 @@ static void async_cleanup_and_send_btree_stats(PortData* d, char *type, DB_BTREE
     // the port could go away without waiting on us to finish. This is acceptable, but we need
     // to be certain that there is no overlap of data between the two threads. driver_send_term
     // is safe to use from a thread, even if the port you're sending from has already expired.
-    ErlDrvPort port = d->port;
+    // ErlDrvPort port = d->port;
     ErlDrvTermData pid = d->port_owner;
     bdberl_async_cleanup(d);
 
@@ -90,7 +90,7 @@ static void async_cleanup_and_send_btree_stats(PortData* d, char *type, DB_BTREE
         ERL_DRV_LIST, 21+2,
         ERL_DRV_TUPLE, 2 
     };
-    driver_send_term(port, pid, response, sizeof(response) / sizeof(response[0]));
+    SEND_TERM(d, pid, response, sizeof(response) / sizeof(response[0]));
 }
 #undef BT_STATS_TUPLE
 
@@ -107,7 +107,7 @@ static void async_cleanup_and_send_hash_stats(PortData* d, DB_HASH_STAT *hsp)
     // the port could go away without waiting on us to finish. This is acceptable, but we need
     // to be certain that there is no overlap of data between the two threads. driver_send_term
     // is safe to use from a thread, even if the port you're sending from has already expired.
-    ErlDrvPort port = d->port;
+    // ErlDrvPort port = d->port;
     ErlDrvTermData pid = d->port_owner;
     bdberl_async_cleanup(d);
 
@@ -139,7 +139,7 @@ static void async_cleanup_and_send_hash_stats(PortData* d, DB_HASH_STAT *hsp)
         ERL_DRV_LIST, 17+2,
         ERL_DRV_TUPLE, 2 
     };
-    driver_send_term(port, pid, response, sizeof(response) / sizeof(response[0]));
+    SEND_TERM(d, pid, response, sizeof(response) / sizeof(response[0]));
 }
 #undef HASH_STATS_TUPLE
 
@@ -184,7 +184,7 @@ static void async_cleanup_and_send_queue_stats(PortData* d, DB_QUEUE_STAT *qsp)
         ERL_DRV_LIST, 13+2,
         ERL_DRV_TUPLE, 2 
     };
-    driver_send_term(port, pid, response, sizeof(response) / sizeof(response[0]));
+    SEND_TERM(d, pid, response, sizeof(response) / sizeof(response[0]));
 }
 #undef QUEUE_STATS_TUPLE
 #endif // ENABLE_QUEUE
@@ -206,7 +206,7 @@ static void async_cleanup_and_send_lock_stats(PortData* d, DB_LOCK_STAT *lsp)
     // the port could go away without waiting on us to finish. This is acceptable, but we need
     // to be certain that there is no overlap of data between the two threads. driver_send_term
     // is safe to use from a thread, even if the port you're sending from has already expired.
-    ErlDrvPort port = d->port;
+    // ErlDrvPort port = d->port;
     ErlDrvTermData pid = d->port_owner;
     bdberl_async_cleanup(d);
 
@@ -261,7 +261,7 @@ static void async_cleanup_and_send_lock_stats(PortData* d, DB_LOCK_STAT *lsp)
         ERL_DRV_LIST, 42+1,
         ERL_DRV_TUPLE, 2 
     };
-    driver_send_term(port, pid, response, sizeof(response) / sizeof(response[0]));
+    SEND_TERM(d, pid, response, sizeof(response) / sizeof(response[0]));
 }
 
 static void async_cleanup_and_send_log_stats(PortData* d, DB_LOG_STAT *lsp)
@@ -271,7 +271,7 @@ static void async_cleanup_and_send_log_stats(PortData* d, DB_LOG_STAT *lsp)
     // the port could go away without waiting on us to finish. This is acceptable, but we need
     // to be certain that there is no overlap of data between the two threads. driver_send_term
     // is safe to use from a thread, even if the port you're sending from has already expired.
-    ErlDrvPort port = d->port;
+    // ErlDrvPort port = d->port;
     ErlDrvTermData pid = d->port_owner;
     bdberl_async_cleanup(d);
 
@@ -307,10 +307,10 @@ static void async_cleanup_and_send_log_stats(PortData* d, DB_LOG_STAT *lsp)
         ERL_DRV_LIST, 23+1,
         ERL_DRV_TUPLE, 2 
     };
-    driver_send_term(port, pid, response, sizeof(response) / sizeof(response[0]));
+    SEND_TERM(d, pid, response, sizeof(response) / sizeof(response[0]));
 }
 
-static void send_mpool_fstat(ErlDrvPort port, ErlDrvTermData pid, DB_MPOOL_FSTAT *fsp)
+static void send_mpool_fstat(PortData* d, ErlDrvTermData pid, DB_MPOOL_FSTAT *fsp)
 {
     char *name = fsp->file_name ? fsp->file_name : "<null>";
     int name_len = strlen(name);
@@ -331,7 +331,7 @@ static void send_mpool_fstat(ErlDrvPort port, ErlDrvTermData pid, DB_MPOOL_FSTAT
         ERL_DRV_LIST, 7+1,
         ERL_DRV_TUPLE, 2 
     };
-    driver_send_term(port, pid, response, sizeof(response) / sizeof(response[0]));    
+    SEND_TERM(d, pid, response, sizeof(response) / sizeof(response[0]));    
 }
 
 static void async_cleanup_and_send_memp_stats(PortData* d, DB_MPOOL_STAT *gsp,
@@ -342,7 +342,7 @@ static void async_cleanup_and_send_memp_stats(PortData* d, DB_MPOOL_STAT *gsp,
     // the port could go away without waiting on us to finish. This is acceptable, but we need
     // to be certain that there is no overlap of data between the two threads. driver_send_term
     // is safe to use from a thread, even if the port you're sending from has already expired.
-    ErlDrvPort port = d->port;
+    // ErlDrvPort port = d->port;
     ErlDrvTermData pid = d->port_owner;
     bdberl_async_cleanup(d);
 
@@ -350,7 +350,7 @@ static void async_cleanup_and_send_memp_stats(PortData* d, DB_MPOOL_STAT *gsp,
     int i;
     for (i = 0; fsp != NULL && fsp[i] != NULL; i++)
     {
-        send_mpool_fstat(port, pid, fsp[i]);
+        send_mpool_fstat(d, pid, fsp[i]);
     }
 
     // Then send the global stats
@@ -403,7 +403,7 @@ static void async_cleanup_and_send_memp_stats(PortData* d, DB_MPOOL_STAT *gsp,
         ERL_DRV_LIST, 40+1,
         ERL_DRV_TUPLE, 2 
     };
-    driver_send_term(port, pid, response, sizeof(response) / sizeof(response[0]));
+    SEND_TERM(d, pid, response, sizeof(response) / sizeof(response[0]));
 }
 
 
@@ -414,7 +414,7 @@ static void async_cleanup_and_send_mutex_stats(PortData* d, DB_MUTEX_STAT *msp)
     // the port could go away without waiting on us to finish. This is acceptable, but we need
     // to be certain that there is no overlap of data between the two threads. driver_send_term
     // is safe to use from a thread, even if the port you're sending from has already expired.
-    ErlDrvPort port = d->port;
+    // ErlDrvPort port = d->port;
     ErlDrvTermData pid = d->port_owner;
     bdberl_async_cleanup(d);
 
@@ -435,7 +435,7 @@ static void async_cleanup_and_send_mutex_stats(PortData* d, DB_MUTEX_STAT *msp)
         ERL_DRV_LIST, 9+1,
         ERL_DRV_TUPLE, 2 
     };
-    driver_send_term(port, pid, response, sizeof(response) / sizeof(response[0]));
+    SEND_TERM(d, pid, response, sizeof(response) / sizeof(response[0]));
 }
 
 #define STATS_TUPLE(base, member)                       \
@@ -450,7 +450,7 @@ static void async_cleanup_and_send_mutex_stats(PortData* d, DB_MUTEX_STAT *msp)
         ERL_DRV_TUPLE, 2,                                           \
         ERL_DRV_TUPLE, 2
 
-static void send_txn_tstat(ErlDrvPort port, ErlDrvTermData pid, DB_TXN_ACTIVE *tasp)
+static void send_txn_tstat(PortData* d, ErlDrvTermData pid, DB_TXN_ACTIVE *tasp)
 {
     char *name = tasp->name ? tasp->name : "<null>";
     int name_len = strlen(name);
@@ -504,7 +504,7 @@ static void send_txn_tstat(ErlDrvPort port, ErlDrvTermData pid, DB_TXN_ACTIVE *t
         ERL_DRV_LIST, 9+1,
         ERL_DRV_TUPLE, 2 
     };
-    driver_send_term(port, pid, response, sizeof(response) / sizeof(response[0]));    
+    SEND_TERM(d, pid, response, sizeof(response) / sizeof(response[0]));    
 }
 
 #define ST_STATS_LSN_TUPLE(base, member)                            \
@@ -521,7 +521,7 @@ static void async_cleanup_and_send_txn_stats(PortData* d, DB_TXN_STAT *tsp)
     // the port could go away without waiting on us to finish. This is acceptable, but we need
     // to be certain that there is no overlap of data between the two threads. driver_send_term
     // is safe to use from a thread, even if the port you're sending from has already expired.
-    ErlDrvPort port = d->port;
+    // ErlDrvPort port = d->port;
     ErlDrvTermData pid = d->port_owner;
     bdberl_async_cleanup(d);
 
@@ -529,7 +529,7 @@ static void async_cleanup_and_send_txn_stats(PortData* d, DB_TXN_STAT *tsp)
     int i;
     for (i = 0; i < tsp->st_nactive; i++)
     {
-        send_txn_tstat(port, pid, tsp->st_txnarray+i);
+        send_txn_tstat(d, pid, tsp->st_txnarray+i);
     }
 
     // Then send the global stats
@@ -557,7 +557,7 @@ static void async_cleanup_and_send_txn_stats(PortData* d, DB_TXN_STAT *tsp)
         ERL_DRV_LIST, 15+1,
         ERL_DRV_TUPLE, 2 
     };
-    driver_send_term(port, pid, response, sizeof(response) / sizeof(response[0]));
+    SEND_TERM(d, pid, response, sizeof(response) / sizeof(response[0]));
 }
 
 
