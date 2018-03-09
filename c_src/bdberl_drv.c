@@ -94,7 +94,7 @@ ErlDrvEntry bdberl_drv_entry =
 static int check_non_neg_env(char *env, unsigned int *val_ptr);
 static int check_pos_env(char *env, unsigned int *val_ptr);
 
-static int open_database(const char* name, DBTYPE type, unsigned int flags, PortData* data, int* dbref_res);
+static int open_database(const char* name, DBTYPE type, int check_crc, unsigned int flags, PortData* data, int* dbref_res);
 static int close_database(int dbref, unsigned flags, PortData* data);
 static void check_all_databases_closed();
 
@@ -594,12 +594,13 @@ static ErlDrvSSizeT bdberl_drv_control(ErlDrvData handle, unsigned int cmd,
     case CMD_OPEN_DB:
     {
         // Extract the type code and filename from the inbuf
-        // Inbuf is: <<Flags:32/unsigned, Type:8, Name/bytes, 0:8>>
+        // Inbuf is: <<Flags:32/unsigned, Type:8, CheckCrc:8, Name/bytes, 0:8>>
         unsigned flags = UNPACK_INT(inbuf, 0);
         DBTYPE type = (DBTYPE) UNPACK_BYTE(inbuf, 4);
-        char* name = UNPACK_STRING(inbuf, 5);
+	int check_crc = UNPACK_BYTE(inbuf, 5);
+        char* name = UNPACK_STRING(inbuf, 6);
         int dbref;
-        int rc = open_database(name, type, flags, d, &dbref);
+        int rc = open_database(name, type, check_crc, flags, d, &dbref);
 
         // Queue up a message for bdberl:open to process
         if (rc == 0) // success: send {ok, DbRef}
@@ -1013,7 +1014,8 @@ void bdberl_txn_tpool_run(TPoolJobFunc main_fn, PortData* d, TPoolJobFunc cancel
     bdberl_tpool_run(d->async_pool, main_fn, d, NULL, job_ptr);
 }
 
-static int open_database(const char* name, DBTYPE type, unsigned int flags, PortData* data, int* dbref_res)
+static int open_database(const char* name, DBTYPE type, int check_crc,
+			 unsigned int flags, PortData* data, int* dbref_res)
 {
     *dbref_res = -1;
 
@@ -1103,7 +1105,7 @@ static int open_database(const char* name, DBTYPE type, unsigned int flags, Port
         G_DATABASES[dbref].name = strdup(name);
         G_DATABASES[dbref].ports = zalloc(sizeof(PortList));
         G_DATABASES[dbref].ports->port = data->port;
-	G_DATABASES[dbref].check_crc = 1;
+	G_DATABASES[dbref].check_crc = check_crc;
 
         // Make entry in hash table of names
         hive_hash_add(G_DATABASES_NAMES, G_DATABASES[dbref].name, &(G_DATABASES[dbref]));

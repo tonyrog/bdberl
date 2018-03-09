@@ -27,7 +27,9 @@
 %% THE SOFTWARE.
 %%
 %% -------------------------------------------------------------------
--module(bdberl).
+-module(bdb).
+
+%% Same as bdberl but do not store CRC-32 field nor check them
 
 -export([open/2, open/3,
          close/1, close/2,
@@ -184,7 +186,7 @@ open(Name, Type, Opts) ->
         hash  -> TypeCode = ?DB_TYPE_HASH;
         unknown -> TypeCode = ?DB_TYPE_UNKNOWN %% BDB automatically determines if file exists
     end,
-    CheckCrc = 1,
+    CheckCrc = 0,
     %% Flags = process_flags(lists:umerge(Opts1, [auto_commit, threaded])),
     Flags = process_flags(lists:umerge(Opts, [])),
     Cmd = <<Flags:32/native, TypeCode:8/signed-native, CheckCrc:8/signed-native,
@@ -895,15 +897,8 @@ get(Db, Key, Opts) ->
     case decode_rc(Result) of
         ok ->
             receive
-                {ok, _, Bin} ->
-                    <<Crc:32/native, Payload/binary>> = Bin,
-                    case erlang:crc32(Payload) of
-                        Crc ->
-                            {ok, binary_to_term(Payload)};
-                        CrcOther ->
-                            error_logger:warning_msg("Invalid CRC: ~p ~p\n", [Crc, CrcOther]),
-                            {error, invalid_crc}
-                    end;
+                {ok, _, Payload} ->
+		    {ok, Payload};
                 not_found -> not_found;
                 {error, Reason} -> {error, Reason}
             end;
@@ -2167,8 +2162,8 @@ decode_rc(Rc) when is_integer(Rc)    -> {unknown, Rc}.
 %%
 %% Convert a term into a binary, returning a tuple with the binary and the length of the binary
 %%
-to_binary(Term) ->
-    Bin = term_to_binary(Term),
+to_binary(IO_list) ->
+    Bin = iolist_to_binary(IO_list),
     {size(Bin), Bin}.
 
 %%
@@ -2230,8 +2225,7 @@ flag_value(Flag) ->
 do_put(Action, Db, Key, Value, Opts) ->
     {KeyLen, KeyBin} = to_binary(Key),
     {_, ValBin} = to_binary(Value),
-    Crc = erlang:crc32(ValBin),
-    FinalValBin = <<Crc:32/native, ValBin/binary>>,
+    FinalValBin = ValBin,
     FinalValBinLen = size(FinalValBin),
     Flags = process_flags(Opts),
     Cmd = <<Db:32/signed-native, Flags:32/native, KeyLen:32/native, KeyBin/bytes,
@@ -2247,15 +2241,8 @@ do_cursor_move(Direction) ->
     case decode_rc(Rc) of
         ok ->
             receive
-                {ok, KeyBin, ValueBin} ->
-                    <<Crc:32/native, Payload/binary>> = ValueBin,
-                    case erlang:crc32(Payload) of
-                        Crc ->
-                            {ok, binary_to_term(KeyBin), binary_to_term(Payload)};
-                        CrcOther ->
-                            error_logger:warning_msg("Invalid CRC on cursor: ~p ~p\n", [Crc, CrcOther]),
-                            {error, invalid_crc}
-                    end;
+                {ok, KeyBin, Payload} ->
+		    {ok, KeyBin, Payload};
                 not_found ->
                     not_found;
                 {error, ReasonCode} ->
@@ -2264,8 +2251,6 @@ do_cursor_move(Direction) ->
         Reason ->
             {error, Reason}
     end.
-
-
 
 %%
 %% Split a binary into pieces, using a single character delimiter
